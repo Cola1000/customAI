@@ -3,4 +3,9 @@ This provides an extension to your VS code for it to run AI models (like deepsee
 
 
 # How to's:
-1. Install Ollama @ [https://ollama.com/download]
+    1. Install Ollama @ [Here](https://ollama.com/download)
+    2. Run 
+```bash
+npm install
+```
+    3. 
