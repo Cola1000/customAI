@@ -14,11 +14,31 @@ interface ChatSession {
     messages: ChatMessage[];
 }
 
+interface WebviewMessage {
+    command: string;
+    text?: string;
+    chatId?: string;
+    [key: string]: any;
+}
+
+// Store active chat ID at module level
+let activeChatId: string | null = null;
+const chatSessions: ChatSession[] = [];
+
 export function activate(context: vscode.ExtensionContext) {
-    let activeChatId: string | null = null;
-    const chatSessions: ChatSession[] = [];
+    const provider = new FireshipViewProvider(context.extensionUri);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(FireshipViewProvider.viewType, provider)
+    );
 
     const disposable = vscode.commands.registerCommand('fireship-ext.start', () => {
+        openChatPanel(context);
+    });
+
+    context.subscriptions.push(disposable);
+    }
+
+    function openChatPanel(context: vscode.ExtensionContext) {
         const panel = vscode.window.createWebviewPanel(
             'chatView',
             'AI Chat',
@@ -28,18 +48,20 @@ export function activate(context: vscode.ExtensionContext) {
                 retainContextWhenHidden: true
             }
         );
-
+    
         panel.webview.html = getWebviewContent();
         setupMessageHandlers(panel);
         createNewChat(panel);
         
+        panel.onDidDispose(() => {
+            // Clean up if needed
+        }, null, context.subscriptions);
+        
         context.subscriptions.push(panel);
-    });
+    }
 
-    context.subscriptions.push(disposable);
-
-    function setupMessageHandlers(panel: vscode.WebviewPanel) {
-        panel.webview.onDidReceiveMessage(async (message: any) => {
+    function setupMessageHandlers(panel: vscode.WebviewPanel | vscode.WebviewView) {
+        panel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
             try {
                 switch (message.command) {
                     case 'newChat':
@@ -57,6 +79,9 @@ export function activate(context: vscode.ExtensionContext) {
                     case 'loadChatList':
                         updateChatList(panel);
                         break;
+                    case 'openChat':
+                        vscode.commands.executeCommand('fireship-ext.start');
+                        break;
                 }
             } catch (error: any) {
                 console.error('Error handling message:', error);
@@ -68,7 +93,7 @@ export function activate(context: vscode.ExtensionContext) {
         });
     }
 
-    function handleSwitchChat(panel: vscode.WebviewPanel, chatId: string) {
+    function handleSwitchChat(panel: vscode.WebviewPanel | vscode.WebviewView, chatId: string) {
         activeChatId = chatId;
         panel.webview.postMessage({
             command: 'loadChat',
@@ -78,7 +103,7 @@ export function activate(context: vscode.ExtensionContext) {
         updateChatList(panel);
     }
 
-    function createNewChat(panel: vscode.WebviewPanel) {
+    function createNewChat(panel: vscode.WebviewPanel | vscode.WebviewView) {
         const newChat: ChatSession = {
             id: Date.now().toString(),
             title: `Chat ${chatSessions.length + 1}`,
@@ -89,7 +114,7 @@ export function activate(context: vscode.ExtensionContext) {
         updateChatList(panel);
     }
 
-    function updateChatList(panel: vscode.WebviewPanel) {
+    function updateChatList(panel: vscode.WebviewPanel | vscode.WebviewView) {
         panel.webview.postMessage({
             command: 'updateChatList',
             chats: chatSessions.map(chat => ({
@@ -104,8 +129,13 @@ export function activate(context: vscode.ExtensionContext) {
         return chatSessions.find(chat => chat.id === chatId)?.messages || [];
     }
 
-    async function handleChatMessage(panel: vscode.WebviewPanel, message: any) {
-        if (!activeChatId) return;
+    async function handleChatMessage(panel: vscode.WebviewPanel | vscode.WebviewView, message: any) {
+        if (!activeChatId) {
+            sendMessageToWebview(panel, 'error', {
+                message: 'No active chat session. Please create a new chat.'
+            });
+            return;
+        }
 
         const chatSession = chatSessions.find(chat => chat.id === activeChatId);
         if (!chatSession) return;
@@ -146,17 +176,25 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }
 
-    async function streamResponse(panel: vscode.WebviewPanel, chatSession: ChatSession, botMessageId: string) {
+    async function streamResponse(panel: vscode.WebviewPanel | vscode.WebviewView, chatSession: ChatSession, botMessageId: string) {
         try {
             const messages = chatSession.messages
-                .slice(0, -1) // Exclude the current bot message
+                .slice(0, -1)
                 .map(msg => ({ role: msg.role, content: msg.content }));
-
+    
+            if (!messages.length) {
+                throw new Error('No messages to process');
+            }
+    
             const response = await ollama.chat({
-                model: 'deepseek-r1:8b',
+                model: 'deepseek-r1:latest',
                 messages,
                 stream: true
             });
+    
+            if (!response) {
+                throw new Error('No response from model');
+            }
 
             let responseText = '';
             for await (const part of response) {
@@ -178,8 +216,15 @@ export function activate(context: vscode.ExtensionContext) {
                 content: formatResponseText(responseText),
                 loading: false
             });
-        } catch (error) {
+        } catch (error: any) {
             console.error('Streaming error:', error);
+            updateBotMessage(chatSession, botMessageId, 'An error occurred while generating the response.', false);
+            sendMessageToWebview(panel, 'updateMessage', {
+                chatId: activeChatId,
+                messageId: botMessageId,
+                content: 'An error occurred while generating the response.',
+                loading: false
+            });
             throw error;
         }
     }
@@ -195,7 +240,66 @@ export function activate(context: vscode.ExtensionContext) {
     function sendMessageToWebview(panel: vscode.WebviewPanel, command: string, data: any) {
         panel.webview.postMessage({ command, ...data });
     }
-}
+
+    class FireshipViewProvider implements vscode.WebviewViewProvider {
+        public static readonly viewType = 'fireshipView';
+        private _view?: vscode.WebviewView;
+    
+        constructor(private readonly extensionUri: vscode.Uri) {}
+    
+        public resolveWebviewView(
+            webviewView: vscode.WebviewView,
+            _context: vscode.WebviewViewResolveContext,
+            _token: vscode.CancellationToken
+        ) {
+            this._view = webviewView;
+            webviewView.webview.options = {
+                enableScripts: true,
+                localResourceRoots: [this.extensionUri]
+            };
+    
+            webviewView.webview.html = `<!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Chat</title>
+        <style>
+            body {
+                padding: 16px;
+                display: flex;
+                flex-direction: column;
+                gap: 16px;
+            }
+            button {
+                padding: 8px 16px;
+                background: var(--vscode-button-background);
+                color: var(--vscode-button-foreground);
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                width: 100%;
+            }
+            button:hover {
+                background: var(--vscode-button-hoverBackground);
+            }
+        </style>
+    </head>
+    <body>
+        <button id="openChat">Open Chat</button>
+        <script>
+            const vscode = acquireVsCodeApi();
+            document.getElementById('openChat').addEventListener('click', () => {
+                vscode.postMessage({ command: 'openChat' });
+            });
+        </script>
+    </body>
+    </html>`;
+    
+            setupMessageHandlers(webviewView);
+        }
+    }
+    
 
 function formatResponseText(text: string): string {
     return text
@@ -229,7 +333,19 @@ function formatResponseText(text: string): string {
         .replace(/\n/g, '<br>');
 }
 
+function getNonce() {
+    let text = '';
+    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    for (let i = 0; i < 32; i++) {
+        text += possible.charAt(Math.floor(Math.random() * possible.length));
+    }
+    return text;
+  }
+
 function getWebviewContent(): string {
+
+    const nonce = getNonce();
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -525,13 +641,11 @@ function getWebviewContent(): string {
             }
         }
 
-        function loadChat({ messages, chatId }) {
-            activeChatId = chatId;
+        function scrollToBottom() {
             const messagesDiv = document.getElementById('chatMessages');
-            messagesDiv.innerHTML = '';
-            messages.forEach(appendMessage);
-            scrollToBottom();
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
+
 
         function showError(message) {
             const messagesDiv = document.getElementById('chatMessages');
@@ -556,4 +670,7 @@ function getWebviewContent(): string {
 </html>`;
 }
 
-export function deactivate() {}
+export function deactivate() {
+    chatSessions.length = 0;
+    activeChatId = null;
+}

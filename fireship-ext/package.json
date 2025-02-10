@@ -12,13 +12,34 @@
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "fireshipSidebar",
+          "title": "What are you looking at?!",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "fireshipSidebar": [
+        {
+          "id": "fireshipView",
+          "name": "Chat"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "fireship-ext.start",
-        "title": "Chat with AI"
+        "title": "Make Me Pregnant"
       }
     ]
   },
+  "activationEvents": [
+  "onView:fireshipView",
+  "onCommand:fireship-ext.start"
+  ],
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
