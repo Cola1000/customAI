@@ -1,13 +1,14 @@
 import * as vscode from 'vscode';
 import ollama from 'ollama';
 
+type WebviewContainer = vscode.WebviewPanel | vscode.WebviewView;
+
 interface ChatMessage {
     role: 'user' | 'assistant';
     content: string;
     id?: string;
     loading?: boolean;
 }
-
 interface ChatSession {
     id: string;
     title: string;
@@ -26,6 +27,19 @@ let activeChatId: string | null = null;
 const chatSessions: ChatSession[] = [];
 
 export function activate(context: vscode.ExtensionContext) {
+
+    const sidebarProvider = new FireshipViewProvider(context.extensionUri);
+    const registration = vscode.window.registerWebviewViewProvider(
+        FireshipViewProvider.viewType,
+        sidebarProvider
+    );
+
+    const chatCommand = vscode.commands.registerCommand('fireship-ext.start', () => {
+        openChatPanel(context);
+    });
+
+    context.subscriptions.push(registration, chatCommand);
+
     const provider = new FireshipViewProvider(context.extensionUri);
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(FireshipViewProvider.viewType, provider)
@@ -60,7 +74,7 @@ export function activate(context: vscode.ExtensionContext) {
         context.subscriptions.push(panel);
     }
 
-    function setupMessageHandlers(panel: vscode.WebviewPanel | vscode.WebviewView) {
+    function setupMessageHandlers(panel: WebviewContainer) {
         panel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
             try {
                 switch (message.command) {
@@ -74,6 +88,9 @@ export function activate(context: vscode.ExtensionContext) {
                         await handleChatMessage(panel, message);
                         break;
                     case 'switchChat':
+                        if (!message.chatId) {
+                            throw new Error('Chat ID is required for switching chats');
+                        }
                         handleSwitchChat(panel, message.chatId);
                         break;
                     case 'loadChatList':
@@ -93,7 +110,7 @@ export function activate(context: vscode.ExtensionContext) {
         });
     }
 
-    function handleSwitchChat(panel: vscode.WebviewPanel | vscode.WebviewView, chatId: string) {
+    function handleSwitchChat(panel: WebviewContainer, chatId: string) {
         activeChatId = chatId;
         panel.webview.postMessage({
             command: 'loadChat',
@@ -103,7 +120,7 @@ export function activate(context: vscode.ExtensionContext) {
         updateChatList(panel);
     }
 
-    function createNewChat(panel: vscode.WebviewPanel | vscode.WebviewView) {
+    function createNewChat(panel: WebviewContainer) {
         const newChat: ChatSession = {
             id: Date.now().toString(),
             title: `Chat ${chatSessions.length + 1}`,
@@ -114,7 +131,7 @@ export function activate(context: vscode.ExtensionContext) {
         updateChatList(panel);
     }
 
-    function updateChatList(panel: vscode.WebviewPanel | vscode.WebviewView) {
+    function updateChatList(panel: WebviewContainer) {
         panel.webview.postMessage({
             command: 'updateChatList',
             chats: chatSessions.map(chat => ({
@@ -129,7 +146,7 @@ export function activate(context: vscode.ExtensionContext) {
         return chatSessions.find(chat => chat.id === chatId)?.messages || [];
     }
 
-    async function handleChatMessage(panel: vscode.WebviewPanel | vscode.WebviewView, message: any) {
+    async function handleChatMessage(panel: WebviewContainer, message: any) {
         if (!activeChatId) {
             sendMessageToWebview(panel, 'error', {
                 message: 'No active chat session. Please create a new chat.'
@@ -176,7 +193,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }
 
-    async function streamResponse(panel: vscode.WebviewPanel | vscode.WebviewView, chatSession: ChatSession, botMessageId: string) {
+    async function streamResponse(panel: WebviewContainer, chatSession: ChatSession, botMessageId: string) {
         try {
             const messages = chatSession.messages
                 .slice(0, -1)
@@ -191,7 +208,9 @@ export function activate(context: vscode.ExtensionContext) {
                 messages,
                 stream: true
             });
-    
+            
+            vscode.window.showInformationMessage('Connected Succesfully to AI Model');
+
             if (!response) {
                 throw new Error('No response from model');
             }
@@ -237,7 +256,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }
 
-    function sendMessageToWebview(panel: vscode.WebviewPanel, command: string, data: any) {
+    function sendMessageToWebview(panel: WebviewContainer, command: string, data: any) {
         panel.webview.postMessage({ command, ...data });
     }
 
@@ -249,54 +268,114 @@ export function activate(context: vscode.ExtensionContext) {
     
         public resolveWebviewView(
             webviewView: vscode.WebviewView,
-            _context: vscode.WebviewViewResolveContext,
-            _token: vscode.CancellationToken
+            context: vscode.WebviewViewResolveContext,
+            token: vscode.CancellationToken
         ) {
             this._view = webviewView;
+    
             webviewView.webview.options = {
                 enableScripts: true,
                 localResourceRoots: [this.extensionUri]
             };
     
-            webviewView.webview.html = `<!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Chat</title>
-        <style>
-            body {
-                padding: 16px;
-                display: flex;
-                flex-direction: column;
-                gap: 16px;
-            }
-            button {
-                padding: 8px 16px;
-                background: var(--vscode-button-background);
-                color: var(--vscode-button-foreground);
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-                width: 100%;
-            }
-            button:hover {
-                background: var(--vscode-button-hoverBackground);
-            }
-        </style>
-    </head>
-    <body>
-        <button id="openChat">Open Chat</button>
-        <script>
-            const vscode = acquireVsCodeApi();
-            document.getElementById('openChat').addEventListener('click', () => {
-                vscode.postMessage({ command: 'openChat' });
-            });
-        </script>
-    </body>
-    </html>`;
-    
+            webviewView.webview.html = this.getInitialHtml();
             setupMessageHandlers(webviewView);
+    
+            if (chatSessions.length === 0) {
+                createNewChat(webviewView);
+            } else {
+                updateChatList(webviewView);
+            }
+        }
+    
+        private getInitialHtml(): string {
+            return `<!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Chat</title>
+                <style>
+                    body {
+                        padding: 16px;
+                        display: flex;
+                        flex-direction: column;
+                        gap: 16px;
+                    }
+                    button {
+                        padding: 8px 16px;
+                        background: var(--vscode-button-background);
+                        color: var(--vscode-button-foreground);
+                        border: none;
+                        border-radius: 4px;
+                        cursor: pointer;
+                        width: 100%;
+                    }
+                    button:hover {
+                        background: var(--vscode-button-hoverBackground);
+                    }
+                    #chatList {
+                        margin-top: 16px;
+                    }
+                    .chat-item {
+                        padding: 8px;
+                        margin: 4px 0;
+                        cursor: pointer;
+                        border-radius: 4px;
+                    }
+                    .chat-item:hover {
+                        background: var(--vscode-list-hoverBackground);
+                    }
+                    .chat-item.active {
+                        background: var(--vscode-list-activeSelectionBackground);
+                        color: var(--vscode-list-activeSelectionForeground);
+                    }
+                </style>
+            </head>
+            <body>
+                <button id="openChat">Open Chat</button>
+                <button id="newChat">New Chat</button>
+                <div id="chatList"></div>
+                <script>
+                    const vscode = acquireVsCodeApi();
+                    
+                    document.getElementById('openChat').addEventListener('click', () => {
+                        vscode.postMessage({ command: 'openChat' });
+                    });
+                    
+                    document.getElementById('newChat').addEventListener('click', () => {
+                        vscode.postMessage({ command: 'newChat' });
+                    });
+    
+                    document.getElementById('chatList').addEventListener('click', (e) => {
+                        const chatItem = e.target.closest('.chat-item');
+                        if (chatItem) {
+                            vscode.postMessage({ 
+                                command: 'switchChat', 
+                                chatId: chatItem.dataset.chatId 
+                            });
+                        }
+                    });
+    
+                    window.addEventListener('message', (event) => {
+                        const message = event.data;
+                        if (message.command === 'updateChatList') {
+                            const chatList = document.getElementById('chatList');
+                            chatList.innerHTML = message.chats.map(function(chat) {
+                                return '<div class="chat-item ' + 
+                                      (chat.active ? 'active' : '') + 
+                                      '" data-chat-id="' + chat.id + '">' +
+                                      chat.title +
+                                      '</div>';
+                            }).join('');
+                        }
+                    });
+    
+                    // Request initial chat list
+                    vscode.postMessage({ command: 'loadChatList' });
+                </script>
+            </body>
+            </html>`;
         }
     }
     

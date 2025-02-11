@@ -9,7 +9,7 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": ["onView:fireshipView"],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -24,6 +24,7 @@
     "views": {
       "fireshipSidebar": [
         {
+          "type": "webview",
           "id": "fireshipView",
           "name": "Chat"
         }
@@ -36,10 +37,6 @@
       }
     ]
   },
-  "activationEvents": [
-  "onView:fireshipView",
-  "onCommand:fireship-ext.start"
-  ],
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
