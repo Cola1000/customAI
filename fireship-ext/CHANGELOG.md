@@ -2,8 +2,13 @@
 
 All notable changes to the "fireship-ext" extension will be documented in this file.
 
-Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
+## Released
+
+- Initial Chat Box and Basic HTML formatting
+- Launching Chat Box with 'ctrl+p', named: "Chat With AI"
 
 ## [Unreleased]
 
-- Initial release
+- Sidebar Implementation
+- Mathematical Notation
+- Multiple Chat Box Conversation
